@@ -169,9 +169,10 @@ func runWizard() (*config.Config, error) {
 	if !hasLoopback {
 		fmt.Println()
 		fmt.Println("  ⚠ 没有找到回环虚拟声卡。抖音直播伴侣只能把「真实设备」当成麦克风，")
-		fmt.Println("    所以需要先安装一个虚拟声卡，推荐 BlackHole 2ch：")
-		fmt.Println("        brew install --cask blackhole-2ch")
-		fmt.Println("    （安装时需要输入登录密码，装完重新运行 finalmic setup）")
+		fmt.Println("    所以需要先安装一块虚拟声卡。finalmic 自带一个，安装一次即可：")
+		fmt.Println("        sudo make install-driver")
+		fmt.Println("    （需要管理员密码，装完重新运行 finalmic setup）")
+		fmt.Println("    也可以改用现成的 BlackHole：brew install --cask blackhole-2ch")
 	}
 	fmt.Println()
 	pickDef := 1

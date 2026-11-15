@@ -98,11 +98,26 @@ func looksLoopback(d audio.Device) bool {
 	return d.Virtual()
 }
 
-// sortLoopbackFirst moves loopback candidates to the front, preserving order.
+// isOwnDevice reports whether d is finalmic's own virtual sound card.
+func isOwnDevice(d audio.Device) bool {
+	return strings.Contains(strings.ToLower(d.Name), "finalmic") ||
+		strings.Contains(strings.ToLower(d.UID), "finalmic")
+}
+
+// sortLoopbackFirst moves finalmic's own device first, then other loopbacks.
 func sortLoopbackFirst(devs []audio.Device) []audio.Device {
 	out := append([]audio.Device(nil), devs...)
 	sort.SliceStable(out, func(i, j int) bool {
-		return looksLoopback(out[i]) && !looksLoopback(out[j])
+		rank := func(d audio.Device) int {
+			if isOwnDevice(d) {
+				return 2
+			}
+			if looksLoopback(d) {
+				return 1
+			}
+			return 0
+		}
+		return rank(out[i]) > rank(out[j])
 	})
 	return out
 }
