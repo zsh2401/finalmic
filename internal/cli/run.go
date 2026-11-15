@@ -118,7 +118,7 @@ func planFromFlags(o *runOptions) (*config.Config, error) {
 			return nil, err
 		}
 		cfg.Sources = append(cfg.Sources, config.Source{
-			UID: d.UID, Name: d.Name, GainDB: gain, Role: it.role,
+			UID: d.UID, Name: d.Name, GainDB: gain, Role: it.role, Highpass: true,
 		})
 	}
 	if o.out != "" {
@@ -395,14 +395,27 @@ func meterLines(r *ui.Renderer, st audio.Stats, cfg *config.Config, ac audio.Con
 		buf /= n
 		drift /= n
 	}
-	lines = append(lines, fmt.Sprintf("  %s  %.1f ms · %s %+.0f ppm · %s %d · %s %d",
-		r.Note("抖动缓冲"), buf, r.Note("漂移"), drift,
-		r.Note("欠载"), xr, r.Note("丢弃"), dr))
+	if time.Since(started) > 3*time.Second && !anyPrimed(st) {
+		lines = append(lines, r.Warn("  ⚠ 3 秒内没有收到音频数据：检查麦克风权限，或设备是否被静音"))
+	} else {
+		lines = append(lines, fmt.Sprintf("  %s  %.1f ms · %s %+.0f ppm · %s %d · %s %d",
+			r.Note("抖动缓冲"), buf, r.Note("漂移"), drift,
+			r.Note("欠载"), xr, r.Note("丢弃"), dr))
+	}
 
 	if recPath != "" {
 		lines = append(lines, fmt.Sprintf("  %s  %s", r.Note("录音"), recPath))
 	}
 	return lines
+}
+
+func anyPrimed(st audio.Stats) bool {
+	for _, p := range st.Primed {
+		if p {
+			return true
+		}
+	}
+	return false
 }
 
 func fmtDuration(d time.Duration) string {

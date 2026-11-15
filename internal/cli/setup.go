@@ -186,11 +186,11 @@ func runWizard() (*config.Config, error) {
 		TargetMS:   30,
 	}
 	cfg.Sources = append(cfg.Sources, config.Source{
-		UID: mic.UID, Name: mic.Name, Role: config.RoleMic,
+		UID: mic.UID, Name: mic.Name, Role: config.RoleMic, Highpass: true,
 	})
 	if capture != nil {
 		cfg.Sources = append(cfg.Sources, config.Source{
-			UID: capture.UID, Name: capture.Name, Role: config.RoleCapture,
+			UID: capture.UID, Name: capture.Name, Role: config.RoleCapture, Highpass: true,
 		})
 	}
 

@@ -172,6 +172,7 @@ func DB(db float64) string {
 func (r *Renderer) Label(s string) string { return r.paint(dim, s) }
 func (r *Renderer) Title(s string) string { return r.paint(bold+cyan, s) }
 func (r *Renderer) Note(s string) string  { return r.paint(dim, s) }
+func (r *Renderer) Warn(s string) string  { return r.paint(yellow, s) }
 
 // Line builds a separator.
 func (r *Renderer) Line(width int) string {
