@@ -198,6 +198,8 @@ func choosePlan(o *runOptions) (*config.Config, error) {
 			return nil, err
 		}
 		cfg.OutputUID, cfg.OutputName = d.UID, d.Name
+	} else {
+		preferOwnDevice(cfg)
 	}
 	return cfg, nil
 }
