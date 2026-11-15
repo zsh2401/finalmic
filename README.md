@@ -40,12 +40,13 @@ finalmic 把两路输入实时混合，写进一块**真正由它自己的**虚�
 - macOS 13 或更新（Apple Silicon / Intel 均可）
 - Xcode Command Line Tools：`xcode-select --install`
 - Go 1.22+
-- 安装自带驱动需要**一次管理员密码**
+- 安装自带驱动需要**一次管理员密码**（构建不要用 sudo，只有安装那一步需要）
 
 ## 快速开始
 
 ```bash
-make build                 # 构建 bin/finalmic 和虚拟声卡驱动
+make build                 # 构建 bin/finalmic
+make driver                # 构建虚拟声卡驱动（不要用 sudo 构建）
 sudo make install-driver   # 安装 finalmic.driver（只需一次，会要密码）
 make run                   # 启动（首次运行进入配置向导）
 ```

@@ -34,8 +34,10 @@ test-driver: driver
 		-framework CoreAudio -framework CoreFoundation -ldl
 	@./build/test_host $(DRIVER_BUNDLE)/Contents/MacOS/finalmic
 
-## install-driver: 安装虚拟声卡到系统（会要一次管理员密码）
-install-driver: driver
+## install-driver: 安装虚拟声卡到系统（先 make driver，再 sudo make install-driver）
+install-driver:
+	@if [ ! -d "$(DRIVER_BUNDLE)" ]; then \
+		echo "  先构建驱动：make driver"; exit 1; fi
 	@sudo mkdir -p $(HAL_DIR)
 	@sudo rm -rf $(HAL_DIR)/finalmic.driver
 	@sudo cp -R $(DRIVER_BUNDLE) $(HAL_DIR)/finalmic.driver

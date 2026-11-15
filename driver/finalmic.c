@@ -17,9 +17,11 @@
 #include <CoreAudio/AudioHardware.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach_time.h>
+#include <stdarg.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 
 /* ---------------------------------------------------------------- config */
@@ -68,8 +70,32 @@ typedef struct FinalmicDriver {
     float ring[kRingFrames * 2];
 } FinalmicDriver;
 
+static CFArrayRef g_empty_array;
+
 static FinalmicDriver *driver_from_ref(void *ref) {
     return (FinalmicDriver *)ref;
+}
+
+/* ---------------------------------------------------------------- tracing */
+
+static FILE *g_log;
+
+static void fm_log(const char *fmt, ...) {
+    if (!g_log) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(g_log, fmt, ap);
+    va_end(ap);
+    fputc('\n', g_log);
+    fflush(g_log);
+}
+
+static void fourcc(UInt32 v, char out[5]) {
+    out[0] = (char)((v >> 24) & 0xff);
+    out[1] = (char)((v >> 16) & 0xff);
+    out[2] = (char)((v >> 8) & 0xff);
+    out[3] = (char)(v & 0xff);
+    out[4] = 0;
 }
 
 /* --------------------------------------------------------------- helpers */
@@ -185,6 +211,16 @@ static OSStatus property_data(FinalmicDriver *d, AudioObjectID obj,
             AudioObjectID ids[1] = {kObjectID_Device};
             return put_ids(ioSize, out, inSize, ids, 1);
         }
+        case kAudioObjectPropertyCustomPropertyInfoList:
+            return put_cf(ioSize, out, inSize, g_empty_array);
+        case kAudioPlugInPropertyBoxList:
+        case kAudioPlugInPropertyClockDeviceList: {
+            AudioObjectID none = 0;
+            return put_ids(ioSize, out, inSize, &none, 0);
+        }
+        case kAudioPlugInPropertyTranslateUIDToBox:
+        case kAudioPlugInPropertyTranslateUIDToClockDevice:
+            return put_u32(ioSize, out, inSize, 0);
         case kAudioPlugInPropertyBundleID:
             return put_cf(ioSize, out, inSize, CFSTR(kBundleID));
         case kAudioPlugInPropertyDeviceList: {
@@ -282,6 +318,10 @@ static OSStatus property_data(FinalmicDriver *d, AudioObjectID obj,
             memcpy(out, &r, sizeof(r));
             return noErr;
         }
+        case kAudioDevicePropertyZeroTimeStampPeriod:
+            /* The HAL models the clock as zero time stamps spaced this many
+             * frames apart; keep it in sync with the ring buffer. */
+            return put_u32(ioSize, out, inSize, kRingFrames);
         case kAudioDevicePropertyLatency:
             return put_u32(ioSize, out, inSize, 0);
         case kAudioDevicePropertySafetyOffset:
@@ -305,6 +345,16 @@ static OSStatus property_data(FinalmicDriver *d, AudioObjectID obj,
             AudioObjectID none = 0;
             return put_ids(ioSize, out, inSize, &none, 0);
         }
+        case kAudioObjectPropertyCustomPropertyInfoList:
+            return put_cf(ioSize, out, inSize, g_empty_array);
+        case kAudioObjectPropertyElementName:
+            return put_cf(ioSize, out, inSize, CFSTR("finalmic"));
+        case kAudioObjectPropertyElementCategoryName:
+            return put_cf(ioSize, out, inSize, CFSTR("finalmic"));
+        case kAudioObjectPropertyElementNumberName:
+            return put_u32(ioSize, out, inSize, 0);
+        case kAudioObjectPropertyFirmwareVersion:
+            return put_cf(ioSize, out, inSize, CFSTR("1.0.0"));
         case kAudioObjectPropertyModelName:
             return put_cf(ioSize, out, inSize, CFSTR(kDeviceName));
         case kAudioObjectPropertySerialNumber:
@@ -343,6 +393,16 @@ static OSStatus property_data(FinalmicDriver *d, AudioObjectID obj,
             AudioObjectID none = 0;
             return put_ids(ioSize, out, inSize, &none, 0);
         }
+        case kAudioObjectPropertyCustomPropertyInfoList:
+            return put_cf(ioSize, out, inSize, g_empty_array);
+        case kAudioObjectPropertyElementName:
+            return put_cf(ioSize, out, inSize,
+                          is_input_stream(obj) ? CFSTR("finalmic Input")
+                                               : CFSTR("finalmic Output"));
+        case kAudioObjectPropertyElementCategoryName:
+            return put_cf(ioSize, out, inSize, CFSTR("finalmic"));
+        case kAudioObjectPropertyElementNumberName:
+            return put_u32(ioSize, out, inSize, 0);
         case kAudioStreamPropertyIsActive:
             return put_u32(ioSize, out, inSize, 1);
         case kAudioStreamPropertyDirection:
@@ -413,6 +473,8 @@ static OSStatus STDMETHODCALLTYPE drv_Initialize(AudioServerPlugInDriverRef inDr
     FinalmicDriver *d = driver_from_ref(inDriver);
     if (!d) return kAudioHardwareBadObjectError;
     d->host = inHost;
+    if (!g_log) g_log = fopen("/tmp/finalmic-driver.log", "a");
+    fm_log("initialize");
 
     mach_timebase_info_data_t tb;
     mach_timebase_info(&tb);
@@ -509,8 +571,16 @@ static OSStatus STDMETHODCALLTYPE drv_GetPropertyDataSize(AudioServerPlugInDrive
     (void)inClientProcessID;
     if (!outDataSize) return kAudioHardwareBadObjectError;
     FinalmicDriver *d = driver_from_ref(inDriver);
-    return property_data(d, inObjectID, inAddress, 0, outDataSize, NULL,
-                         inQualifierDataSize, inQualifierData);
+    OSStatus st = property_data(d, inObjectID, inAddress, 0, outDataSize, NULL,
+                                inQualifierDataSize, inQualifierData);
+    if (inAddress) {
+        char sel[5], sc[5];
+        fourcc(inAddress->mSelector, sel);
+        fourcc(inAddress->mScope, sc);
+        fm_log("size obj=%u %s/%s/%u -> %d (%u)", inObjectID, sel, sc,
+               inAddress->mElement, (int)st, outDataSize ? *outDataSize : 0);
+    }
+    return st;
 }
 
 static OSStatus STDMETHODCALLTYPE drv_GetPropertyData(AudioServerPlugInDriverRef inDriver,
@@ -524,8 +594,16 @@ static OSStatus STDMETHODCALLTYPE drv_GetPropertyData(AudioServerPlugInDriverRef
                                                       void *outData) {
     (void)inClientProcessID;
     FinalmicDriver *d = driver_from_ref(inDriver);
-    return property_data(d, inObjectID, inAddress, inDataSize, outDataSize, outData,
-                         inQualifierDataSize, inQualifierData);
+    OSStatus st = property_data(d, inObjectID, inAddress, inDataSize, outDataSize, outData,
+                                inQualifierDataSize, inQualifierData);
+    if (inAddress) {
+        char sel[5], sc[5];
+        fourcc(inAddress->mSelector, sel);
+        fourcc(inAddress->mScope, sc);
+        fm_log("get  obj=%u %s/%s/%u in=%u -> %d", inObjectID, sel, sc,
+               inAddress->mElement, inDataSize, (int)st);
+    }
+    return st;
 }
 
 static OSStatus STDMETHODCALLTYPE drv_SetPropertyData(AudioServerPlugInDriverRef inDriver,
@@ -577,6 +655,7 @@ static OSStatus STDMETHODCALLTYPE drv_StartIO(AudioServerPlugInDriverRef inDrive
     atomic_store(&d->underruns, 0);
     atomic_store(&d->overruns, 0);
 
+    fm_log("startIO bufferFrames=%u", (unsigned)d->bufferFrames);
     d->anchorHost = mach_absolute_time();
     d->anchorSample = 0.0;
     d->seed++;
@@ -611,9 +690,13 @@ static OSStatus STDMETHODCALLTYPE drv_GetZeroTimeStamp(AudioServerPlugInDriverRe
     UInt64 now = mach_absolute_time();
     if (now < d->anchorHost) now = d->anchorHost;
     double frames = (double)(now - d->anchorHost) / d->ticksPerFrame;
-    UInt64 whole = (UInt64)frames;
-    *outSampleTime = d->anchorSample + (double)whole;
-    *outHostTime = d->anchorHost + (UInt64)((double)whole * d->ticksPerFrame);
+    if (frames < 0.0) frames = 0.0;
+    /* Zero time stamps advance in steps of kRingFrames, matching
+     * kAudioDevicePropertyZeroTimeStampPeriod. */
+    double period = (double)kRingFrames;
+    double zero = floor(frames / period) * period;
+    *outSampleTime = d->anchorSample + zero;
+    *outHostTime = d->anchorHost + (UInt64)(zero * d->ticksPerFrame);
     *outSeed = d->seed;
     return noErr;
 }
@@ -734,6 +817,7 @@ void *FinalmicDriver_Create(CFAllocatorRef allocator, CFUUIDRef typeUUID) {
 
     static AudioServerPlugInDriverInterface vtable;
     static int vtable_ready = 0;
+    if (!g_empty_array) g_empty_array = CFArrayCreate(NULL, NULL, 0, &kCFTypeArrayCallBacks);
     if (!vtable_ready) {
         vtable._reserved = NULL;
         vtable.QueryInterface = drv_QueryInterface;
