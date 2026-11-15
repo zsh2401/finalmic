@@ -347,7 +347,7 @@ func printStartup(cfg *config.Config, ac audio.Config, o *runOptions, interactiv
 		fmt.Printf("  ⚠ “%s” 不是回环设备，直播软件无法把它当成麦克风。\n", ac.Output.Name)
 	}
 	if interactive {
-		fmt.Println("  → 1-4 选输入 · o 选输出 · +/- 调音量 · m 静音 · 0 归零 · q 退出")
+		fmt.Println("  → ←/→ 调音量 · ↑/↓ 选通道 · m 静音 · 0 归零 · q 退出")
 	} else {
 		fmt.Println("  → Ctrl-C 停止")
 	}
@@ -518,10 +518,20 @@ func runMeterLoop(eng *audio.Engine, mx *mixer, ac audio.Config, o *runOptions,
 				}
 			case k == 'o' || k == 'O':
 				mx.sel = mx.n
-			case k == '+' || k == '=':
+			case k == keyRight || k == '+' || k == '=':
 				mx.adjust(1)
-			case k == '-' || k == '_':
+			case k == keyLeft || k == '-' || k == '_':
 				mx.adjust(-1)
+			case k == keyUp:
+				mx.sel--
+				if mx.sel < 0 {
+					mx.sel = mx.n
+				}
+			case k == keyDown:
+				mx.sel++
+				if mx.sel > mx.n {
+					mx.sel = 0
+				}
 			case k == 'm' || k == 'M':
 				mx.toggleMute()
 			case k == '0':
@@ -620,7 +630,7 @@ func meterLines(r *ui.Renderer, st audio.Stats, mx *mixer, ac audio.Config,
 			r.Note("抖动缓冲"), buf, r.Note("漂移"), drift,
 			r.Note("欠载"), xr, r.Note("丢弃"), dr))
 	}
-	lines = append(lines, r.Note("  1-4 选择 · o 输出 · +/- 音量 · m 静音 · 0 归零 · q 退出"))
+	lines = append(lines, r.Note("  ←/→ 音量 · ↑/↓ 选择 · 1-4 输入 · o 输出 · m 静音 · 0 归零 · q 退出"))
 	if recPath != "" {
 		lines = append(lines, fmt.Sprintf("  %s  %s", r.Note("录音"), recPath))
 	}

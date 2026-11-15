@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"io"
 	"os"
 	"syscall"
 	"unsafe"
@@ -46,12 +47,39 @@ func (s *ttyState) restore(f *os.File) {
 	_ = ioctl(f.Fd(), syscall.TIOCSETA, unsafe.Pointer(&s.termios))
 }
 
-// readKeys forwards single key presses until stdin fails.
+// Logical keys for the arrow keys; values above ASCII so they cannot collide.
+const (
+	keyLeft byte = 0x80 + iota
+	keyRight
+	keyUp
+	keyDown
+)
+
+// readKeys forwards single key presses until stdin fails. ANSI arrow
+// sequences are decoded into the key* constants.
 func readKeys(f *os.File, out chan<- byte) {
 	buf := make([]byte, 1)
 	for {
 		n, err := f.Read(buf)
 		if n > 0 {
+			if buf[0] == 0x1b {
+				seq := make([]byte, 2)
+				if _, err := io.ReadFull(f, seq); err == nil && seq[0] == '[' {
+					switch seq[1] {
+					case 'A':
+						out <- keyUp
+					case 'B':
+						out <- keyDown
+					case 'C':
+						out <- keyRight
+					case 'D':
+						out <- keyLeft
+					}
+					continue
+				}
+				out <- 0x1b
+				continue
+			}
 			out <- buf[0]
 		}
 		if err != nil {
