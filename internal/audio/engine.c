@@ -310,6 +310,8 @@ struct fm_engine {
     double   target_ms;
     uint32_t target_fill;
     double   master_gain;
+    double   master_db;
+    _Atomic double master_tgt;
 
     _Atomic double out_peak;
     _Atomic double out_ss;
@@ -478,9 +480,13 @@ static OSStatus output_callback(void *ref, AudioUnitRenderActionFlags *flags,
 
     for (int i = 0; i < e->nsrc; i++) mix_source(e, &e->src[i], out, (int)nframes);
 
+    e->master_gain += (atomic_load_explicit(&e->master_tgt, memory_order_relaxed) -
+                       e->master_gain) * 0.08;
+    float mg = (float)e->master_gain;
+
     double peak = 0.0, ss = 0.0;
     for (UInt32 i = 0; i < nframes * 2; i++) {
-        float v = softclip(out[i]);
+        float v = softclip(out[i] * mg);
         out[i] = v;
         double a = fabs((double)v);
         if (a > peak) peak = a;
@@ -777,6 +783,7 @@ fm_engine *fm_engine_create(const fm_config *cfg, char *err, size_t errlen) {
     e->target_ms = cfg->target_ms > 0 ? cfg->target_ms : FM_TARGET_MS_DEF;
     e->target_fill = (uint32_t)(e->rate * e->target_ms / 1000.0);
     e->master_gain = 1.0;
+    atomic_init(&e->master_tgt, 1.0);
     atomic_init(&e->out_peak, 0.0);
     atomic_init(&e->out_ss, 0.0);
     atomic_init(&e->out_samples, 0);
@@ -911,6 +918,12 @@ void fm_engine_destroy(fm_engine *e) {
     free(e);
 }
 
+void fm_engine_set_master_db(fm_engine *e, double db) {
+    if (!e) return;
+    e->master_db = db;
+    atomic_store_explicit(&e->master_tgt, pow(10.0, db / 20.0), memory_order_relaxed);
+}
+
 void fm_engine_set_gain_db(fm_engine *e, int index, double db) {
     if (!e || index < 0 || index >= e->nsrc) return;
     e->src[index].gain_db = db;
@@ -930,6 +943,7 @@ void fm_engine_get_stats(fm_engine *e, fm_stats *out) {
         long long n = atomic_exchange_explicit(&s->samples_acc, 0, memory_order_relaxed);
         out->peak_db[i] = to_db(peak);
         out->rms_db[i] = n > 0 ? to_db(sqrt(ss / (double)n)) : -120.0;
+        out->gain_db[i] = s->gain_db;
         out->fill_ms[i] = s->fill_ms;
         out->drift_ppm[i] = s->drift_ppm;
         out->xruns[i] = (long long)s->xruns;
@@ -939,6 +953,7 @@ void fm_engine_get_stats(fm_engine *e, fm_stats *out) {
     double op = atomic_exchange_explicit(&e->out_peak, 0.0, memory_order_relaxed);
     double oss = atomic_exchange_explicit(&e->out_ss, 0.0, memory_order_relaxed);
     long long on = atomic_exchange_explicit(&e->out_samples, 0, memory_order_relaxed);
+    out->master_db = e->master_db;
     out->out_peak_db = to_db(op);
     out->out_rms_db = on > 0 ? to_db(sqrt(oss / (double)on)) : -120.0;
     out->frames = on / 2;

@@ -406,6 +406,14 @@ func (e *Engine) StopRecording() {
 	e.recorder = false
 }
 
+// SetMasterDB adjusts the output gain (applied after the mix, before limiting).
+func (e *Engine) SetMasterDB(db float64) {
+	if e.closed {
+		return
+	}
+	C.fm_engine_set_master_db(e.ptr, C.double(db))
+}
+
 // Stats is a snapshot of meters and health counters for one polling interval.
 type Stats struct {
 	PeakDB   []float64
@@ -415,6 +423,9 @@ type Stats struct {
 	XRuns    []int64
 	Drops    []int64
 	Primed   []bool
+	GainsDB  []float64
+
+	MasterDB float64
 
 	OutPeakDB float64
 	OutRMSDB  float64
@@ -432,6 +443,7 @@ func (e *Engine) Stats() Stats {
 		XRuns:    make([]int64, e.nsrc),
 		Drops:    make([]int64, e.nsrc),
 		Primed:   make([]bool, e.nsrc),
+		GainsDB:  make([]float64, e.nsrc),
 	}
 	if e.closed {
 		return st
@@ -446,7 +458,9 @@ func (e *Engine) Stats() Stats {
 		st.XRuns[i] = int64(cs.xruns[i])
 		st.Drops[i] = int64(cs.drops[i])
 		st.Primed[i] = cs.primed[i] != 0
+		st.GainsDB[i] = float64(cs.gain_db[i])
 	}
+	st.MasterDB = float64(cs.master_db)
 	st.OutPeakDB = float64(cs.out_peak_db)
 	st.OutRMSDB = float64(cs.out_rms_db)
 	st.Frames = int64(cs.frames)

@@ -33,6 +33,7 @@ type Config struct {
 	OutputName string   `json:"output_name"`
 	SampleRate float64  `json:"sample_rate"`
 	TargetMS   float64  `json:"target_ms"`
+	MasterGain float64  `json:"master_gain_db"`
 }
 
 // Path is the config file location.

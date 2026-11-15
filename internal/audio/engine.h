@@ -67,6 +67,8 @@ typedef struct {
     double   rms_db[FM_MAX_SOURCES];
     double   out_peak_db;
     double   out_rms_db;
+    double   gain_db[FM_MAX_SOURCES];
+    double   master_db;
     double   fill_ms[FM_MAX_SOURCES];
     double   drift_ppm[FM_MAX_SOURCES];
     long long xruns[FM_MAX_SOURCES];
@@ -83,6 +85,7 @@ int        fm_engine_start(fm_engine *e, char *err, size_t errlen);
 void       fm_engine_stop(fm_engine *e);
 void       fm_engine_destroy(fm_engine *e);
 void       fm_engine_set_gain_db(fm_engine *e, int index, double db);
+void       fm_engine_set_master_db(fm_engine *e, double db);
 void       fm_engine_get_stats(fm_engine *e, fm_stats *out);
 void       fm_engine_set_record_path(fm_engine *e, const char *path);
 int        fm_engine_record_start(fm_engine *e, char *err, size_t errlen);

@@ -31,6 +31,7 @@ type runOptions struct {
 	inputs   multiFlag
 	out      string
 	record   string
+	outGain  float64
 	targetMS float64
 	noMeter  bool
 	reset    bool
@@ -46,6 +47,7 @@ func parseRunFlags(args []string) (*runOptions, error) {
 	fs.Var(&o.inputs, "in", "额外输入，可重复")
 	fs.StringVar(&o.out, "out", "", "虚拟麦克风输出设备")
 	fs.StringVar(&o.record, "record", "", "同时录制为 WAV")
+	fs.Float64Var(&o.outGain, "out-gain", 0, "输出总音量 dB")
 	fs.Float64Var(&o.targetMS, "target-ms", 30, "抖动缓冲毫秒")
 	fs.BoolVar(&o.noMeter, "no-meter", false, "不显示电平表")
 	fs.BoolVar(&o.reset, "reset", false, "忽略已保存配置")
@@ -103,11 +105,9 @@ func planFromFlags(o *runOptions) (*config.Config, error) {
 	for _, s := range o.inputs {
 		items = append(items, item{s, config.RoleOther})
 	}
-	if len(items) == 0 && o.out == "" {
-		return nil, nil
-	}
 	if len(items) == 0 {
-		return nil, errors.New("用 --mic / --capture 至少指定一路输入")
+		/* Only --out was given: keep the saved sources, override the output. */
+		return nil, nil
 	}
 
 	cfg := &config.Config{Version: 1, SampleRate: 48000, TargetMS: o.targetMS}
@@ -174,20 +174,31 @@ func choosePlan(o *runOptions) (*config.Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	if fromFlags != nil {
-		return fromFlags, nil
-	}
-	if o.reset {
-		return runWizard()
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintf(os.Stderr, "  (读取配置失败: %v，重新配置)\n", err)
+	var cfg *config.Config
+	switch {
+	case fromFlags != nil:
+		cfg = fromFlags
+	case o.reset:
+		cfg, err = runWizard()
+	default:
+		cfg, err = config.Load()
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "  (读取配置失败: %v，重新配置)\n", err)
+			}
+			cfg, err = runWizard()
 		}
-		return runWizard()
 	}
-	preferOwnDevice(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if o.out != "" {
+		d, err := audio.ResolveOutput(o.out)
+		if err != nil {
+			return nil, err
+		}
+		cfg.OutputUID, cfg.OutputName = d.UID, d.Name
+	}
 	return cfg, nil
 }
 
@@ -273,6 +284,9 @@ func cmdRun(args []string) int {
 		fmt.Fprintf(os.Stderr, "\n  ✗ 启动音频失败: %v\n\n", err)
 		return 1
 	}
+	if o.outGain != 0 {
+		cfg.MasterGain = o.outGain
+	}
 	if o.record != "" {
 		if err := eng.StartRecording(o.record); err != nil {
 			fmt.Fprintf(os.Stderr, "  ⚠ 无法开始录音: %v\n", err)
@@ -281,15 +295,18 @@ func cmdRun(args []string) int {
 		}
 	}
 
-	printStartup(cfg, ac, o)
+	mx := newMixer(eng, cfg)
+	mx.applyAll()
+	printStartup(cfg, ac, o, ui.IsTTY(os.Stdout) && !o.noMeter)
 
 	started := time.Now()
-	st, total := runMeterLoop(eng, cfg, ac, o, started, devs)
+	st, total := runMeterLoop(eng, mx, ac, o, started, devs)
 	if total == 0 {
 		total = st.Frames
 	}
 	eng.StopRecording()
 	eng.Stop()
+	mx.save()
 
 	elapsed := time.Since(started)
 	fmt.Printf("\n  ✓ 已停止 · 运行 %s · 共混音 %s 帧\n", fmtDuration(elapsed), comma(total))
@@ -312,7 +329,7 @@ func cmdRun(args []string) int {
 	return 0
 }
 
-func printStartup(cfg *config.Config, ac audio.Config, o *runOptions) {
+func printStartup(cfg *config.Config, ac audio.Config, o *runOptions, interactive bool) {
 	fmt.Printf("\n  finalmic %s · %.1f kHz · 立体声 · 抖动缓冲 %.0f ms\n\n",
 		Version, ac.SampleRate/1000, ac.TargetMS)
 	for i, s := range cfg.Sources {
@@ -327,11 +344,129 @@ func printStartup(cfg *config.Config, ac audio.Config, o *runOptions) {
 	} else {
 		fmt.Printf("  ⚠ “%s” 不是回环设备，直播软件无法把它当成麦克风。\n", ac.Output.Name)
 	}
-	fmt.Println("  → Ctrl-C 停止")
+	if interactive {
+		fmt.Println("  → 1-4 选输入 · o 选输出 · +/- 调音量 · m 静音 · 0 归零 · q 退出")
+	} else {
+		fmt.Println("  → Ctrl-C 停止")
+	}
 	fmt.Println()
 }
 
-func runMeterLoop(eng *audio.Engine, cfg *config.Config, ac audio.Config, o *runOptions,
+// mixer keeps the live gain state and applies it to the engine.
+type mixer struct {
+	eng    *audio.Engine
+	cfg    *config.Config
+	n      int
+	sel    int
+	gains  []float64
+	master float64
+	muted  []bool
+	dirty  bool
+}
+
+const (
+	minGainDB = -60.0
+	maxGainDB = 12.0
+	muteDB    = -60.0
+)
+
+func newMixer(eng *audio.Engine, cfg *config.Config) *mixer {
+	m := &mixer{
+		eng:    eng,
+		cfg:    cfg,
+		n:      len(cfg.Sources),
+		gains:  make([]float64, len(cfg.Sources)),
+		muted:  make([]bool, len(cfg.Sources)),
+		master: cfg.MasterGain,
+	}
+	for i, src := range cfg.Sources {
+		m.gains[i] = src.GainDB
+	}
+	return m
+}
+
+func (m *mixer) applyAll() {
+	for i, g := range m.gains {
+		m.eng.SetGainDB(i, g)
+	}
+	m.eng.SetMasterDB(m.master)
+}
+
+func (m *mixer) adjust(delta float64) {
+	if m.sel < m.n {
+		g := clampGain(m.gains[m.sel] + delta)
+		m.gains[m.sel] = g
+		m.muted[m.sel] = g <= muteDB+0.01
+		m.eng.SetGainDB(m.sel, g)
+		m.cfg.Sources[m.sel].GainDB = g
+	} else {
+		g := clampGain(m.master + delta)
+		m.master = g
+		m.eng.SetMasterDB(g)
+		m.cfg.MasterGain = g
+	}
+	m.dirty = true
+}
+
+func (m *mixer) toggleMute() {
+	if m.sel < m.n {
+		if m.muted[m.sel] {
+			m.gains[m.sel] = 0
+			m.muted[m.sel] = false
+			m.eng.SetGainDB(m.sel, 0)
+			m.cfg.Sources[m.sel].GainDB = 0
+		} else {
+			m.gains[m.sel] = muteDB
+			m.muted[m.sel] = true
+			m.eng.SetGainDB(m.sel, muteDB)
+			m.cfg.Sources[m.sel].GainDB = muteDB
+		}
+	} else {
+		if m.master <= muteDB+0.01 {
+			m.master = 0
+		} else {
+			m.master = muteDB
+		}
+		m.eng.SetMasterDB(m.master)
+		m.cfg.MasterGain = m.master
+	}
+	m.dirty = true
+}
+
+func (m *mixer) reset() {
+	if m.sel < m.n {
+		m.gains[m.sel] = 0
+		m.muted[m.sel] = false
+		m.eng.SetGainDB(m.sel, 0)
+		m.cfg.Sources[m.sel].GainDB = 0
+	} else {
+		m.master = 0
+		m.eng.SetMasterDB(0)
+		m.cfg.MasterGain = 0
+	}
+	m.dirty = true
+}
+
+func (m *mixer) save() {
+	if !m.dirty {
+		return
+	}
+	if err := config.Save(m.cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "  (音量未保存: %v)\n", err)
+	}
+}
+
+func clampGain(v float64) float64 {
+	if v < minGainDB {
+		return minGainDB
+	}
+	if v > maxGainDB {
+		return maxGainDB
+	}
+	return v
+}
+
+func runMeterLoop(eng *audio.Engine, mx *mixer, ac audio.Config, o *runOptions,
 	started time.Time, devs []audio.Device) (audio.Stats, int64) {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -343,9 +478,20 @@ func runMeterLoop(eng *audio.Engine, cfg *config.Config, ac audio.Config, o *run
 	}
 
 	tty := ui.IsTTY(os.Stdout)
+	interactive := tty && !o.noMeter
 	renderer := ui.NewRenderer(os.Stdout, tty)
-	if o.noMeter || !tty {
+	if !interactive {
 		fmt.Println("  混音运行中…（Ctrl-C 停止）")
+	}
+
+	keys := make(chan byte, 16)
+	if interactive {
+		if st, err := enterRaw(os.Stdin); err == nil {
+			defer st.restore(os.Stdin)
+			go readKeys(os.Stdin, keys)
+		} else {
+			interactive = false
+		}
 	}
 
 	tick := time.NewTicker(100 * time.Millisecond)
@@ -359,12 +505,34 @@ func runMeterLoop(eng *audio.Engine, cfg *config.Config, ac audio.Config, o *run
 		case <-ctx.Done():
 			renderer.Finish()
 			return last, total
+		case k := <-keys:
+			switch {
+			case k >= '1' && k <= '4':
+				idx := int(k - '1')
+				if idx < mx.n {
+					mx.sel = idx
+				} else {
+					mx.sel = mx.n
+				}
+			case k == 'o' || k == 'O':
+				mx.sel = mx.n
+			case k == '+' || k == '=':
+				mx.adjust(1)
+			case k == '-' || k == '_':
+				mx.adjust(-1)
+			case k == 'm' || k == 'M':
+				mx.toggleMute()
+			case k == '0':
+				mx.reset()
+			case k == 'q' || k == 'Q' || k == 3:
+				stop()
+			}
 		case now := <-tick.C:
 			st := eng.Stats()
 			last = st
 			total += st.Frames
-			if tty && !o.noMeter {
-				renderer.Draw(meterLines(renderer, st, cfg, ac, started, o.record))
+			if interactive {
+				renderer.Draw(meterLines(renderer, st, mx, ac, started, o.record))
 			}
 			if now.Sub(lastCheck) >= time.Second {
 				lastCheck = now
@@ -387,7 +555,7 @@ func firstDeadDevice(devs []audio.Device) *audio.Device {
 	return nil
 }
 
-func meterLines(r *ui.Renderer, st audio.Stats, cfg *config.Config, ac audio.Config,
+func meterLines(r *ui.Renderer, st audio.Stats, mx *mixer, ac audio.Config,
 	started time.Time, recPath string) []string {
 
 	lines := []string{
@@ -395,28 +563,40 @@ func meterLines(r *ui.Renderer, st audio.Stats, cfg *config.Config, ac audio.Con
 			r.Title("finalmic"), r.Note(Version), ac.SampleRate/1000,
 			r.Note("运行"), fmtDuration(time.Since(started))),
 	}
-	for i, s := range cfg.Sources {
+	for i, s := range mx.cfg.Sources {
 		if i >= len(st.PeakDB) {
 			break
 		}
 		bar := r.Bar(st.PeakDB[i], 14)
-		state := ""
-		if !st.Primed[i] {
-			state = r.Note("  缓冲中…")
+		marker := " "
+		name := ui.Pad(ui.Short(s.Name, 30), 30)
+		label := ui.Pad(config.RoleLabel(s.Role), 8)
+		if mx.sel == i {
+			marker = r.Title("▸")
+			name = r.Title(name)
+			label = r.Title(label)
+		} else {
+			label = r.Label(label)
 		}
-		gain := ""
-		if s.GainDB != 0 {
-			gain = fmt.Sprintf("  %+.1f dB", s.GainDB)
-		}
-		lines = append(lines, fmt.Sprintf("  %s  %s  %s  %s%s%s",
-			r.Label(ui.Pad(config.RoleLabel(s.Role), 8)),
-			ui.Pad(ui.Short(s.Name, 30), 30),
-			bar, ui.DB(st.PeakDB[i]), r.Note(gain), state))
+		lines = append(lines, fmt.Sprintf(" %s %s  %s  %s  %s  %s",
+			marker, label, name, bar, ui.DB(st.PeakDB[i]), gainText(r, mx.gains[i], mx.muted[i])))
 	}
-	lines = append(lines, r.Line(76))
-	lines = append(lines, fmt.Sprintf("  %s  %s  %s  %s",
-		r.Label(ui.Pad("输出", 8)), ui.Pad(ui.Short(ac.Output.Name, 30), 30),
-		r.Bar(st.OutPeakDB, 14), ui.DB(st.OutPeakDB)))
+	lines = append(lines, r.Line(80))
+
+	// Output / master row.
+	marker := " "
+	name := ui.Pad(ui.Short(ac.Output.Name, 30), 30)
+	label := ui.Pad("输出", 8)
+	if mx.sel == mx.n {
+		marker = r.Title("▸")
+		name = r.Title(name)
+		label = r.Title(label)
+	} else {
+		label = r.Label(label)
+	}
+	lines = append(lines, fmt.Sprintf(" %s %s  %s  %s  %s  %s",
+		marker, label, name, r.Bar(st.OutPeakDB, 14), ui.DB(st.OutPeakDB),
+		gainText(r, mx.master, mx.master <= muteDB+0.01)))
 
 	var xr, dr int64
 	buf := 0.0
@@ -438,11 +618,18 @@ func meterLines(r *ui.Renderer, st audio.Stats, cfg *config.Config, ac audio.Con
 			r.Note("抖动缓冲"), buf, r.Note("漂移"), drift,
 			r.Note("欠载"), xr, r.Note("丢弃"), dr))
 	}
-
+	lines = append(lines, r.Note("  1-4 选择 · o 输出 · +/- 音量 · m 静音 · 0 归零 · q 退出"))
 	if recPath != "" {
 		lines = append(lines, fmt.Sprintf("  %s  %s", r.Note("录音"), recPath))
 	}
 	return lines
+}
+
+func gainText(r *ui.Renderer, db float64, muted bool) string {
+	if muted || db <= muteDB+0.01 {
+		return r.Mute("  MUTE ")
+	}
+	return fmt.Sprintf("%+6.1f dB", db)
 }
 
 func anyPrimed(st audio.Stats) bool {
