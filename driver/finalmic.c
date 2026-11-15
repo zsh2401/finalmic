@@ -98,6 +98,19 @@ static void fourcc(UInt32 v, char out[5]) {
     out[4] = 0;
 }
 
+static void log_io(const char *op, UInt32 dev, UInt32 stream, UInt32 frames,
+                   AudioBufferList *abl, const char *note) {
+    UInt32 nb = abl ? abl->mNumberBuffers : 0;
+    UInt32 ch = 0;
+    double first = 0.0;
+    if (abl && nb > 0 && abl->mBuffers[0].mData) {
+        ch = abl->mBuffers[0].mNumberChannels;
+        first = ((float *)abl->mBuffers[0].mData)[0];
+    }
+    fm_log("io %-4s dev=%u st=%u n=%u nb=%u ch=%u first=%.6f %s",
+           op, dev, stream, frames, nb, ch, first, note ? note : "");
+}
+
 /* --------------------------------------------------------------- helpers */
 
 static OSStatus put_u32(UInt32 *ioSize, void *out, UInt32 inSize, UInt32 v) {
@@ -655,7 +668,8 @@ static OSStatus STDMETHODCALLTYPE drv_StartIO(AudioServerPlugInDriverRef inDrive
     atomic_store(&d->underruns, 0);
     atomic_store(&d->overruns, 0);
 
-    fm_log("startIO bufferFrames=%u", (unsigned)d->bufferFrames);
+    fm_log("startIO dev=%u bufferFrames=%u client=%u", inDeviceObjectID,
+           (unsigned)d->bufferFrames, inClientID);
     d->anchorHost = mach_absolute_time();
     d->anchorSample = 0.0;
     d->seed++;
@@ -758,12 +772,19 @@ static OSStatus STDMETHODCALLTYPE drv_DoIOOperation(AudioServerPlugInDriverRef i
                                                     const AudioServerPlugInIOCycleInfo *inIOCycleInfo,
                                                     void *ioMainBuffer,
                                                     void *ioSecondaryBuffer) {
-    (void)inClientID; (void)inStreamObjectID; (void)inIOCycleInfo; (void)ioSecondaryBuffer;
+    (void)inClientID; (void)inIOCycleInfo;
     FinalmicDriver *d = driver_from_ref(inDriver);
-    if (!d || !ioMainBuffer || inDeviceObjectID != kObjectID_Device)
-        return kAudioHardwareBadObjectError;
+    if (!d) return kAudioHardwareBadObjectError;
+
     AudioBufferList *abl = (AudioBufferList *)ioMainBuffer;
-    if (abl->mNumberBuffers == 0) return noErr;
+    if (!abl && ioSecondaryBuffer) abl = (AudioBufferList *)ioSecondaryBuffer;
+
+    char op[5];
+    fourcc(inOperationID, op);
+    log_io(op, inDeviceObjectID, inStreamObjectID, inIOBufferFrameSize, abl,
+           abl ? "" : "no-buffer");
+
+    if (!abl || abl->mNumberBuffers == 0 || !abl->mBuffers[0].mData) return noErr;
 
     UInt32 n = inIOBufferFrameSize;
     if (n > kRingFrames / 2) n = kRingFrames / 2;
