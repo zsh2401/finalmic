@@ -64,17 +64,6 @@ static UInt32 scope_streams(AudioServerPlugInDriverRef d, AudioObjectPropertySco
     return n;
 }
 
-/* Non-interleaved 2ch AudioBufferList backed by two scratch arrays. */
-static void make_abl(AudioBufferList *abl, float *l, float *r, UInt32 frames) {
-    abl->mNumberBuffers = 2;
-    abl->mBuffers[0].mNumberChannels = 1;
-    abl->mBuffers[0].mDataByteSize = frames * sizeof(float);
-    abl->mBuffers[0].mData = l;
-    abl->mBuffers[1].mNumberChannels = 1;
-    abl->mBuffers[1].mDataByteSize = frames * sizeof(float);
-    abl->mBuffers[1].mData = r;
-}
-
 int main(int argc, char **argv) {
     const char *path = argc > 1 ? argv[1] : "build/finalmic.driver/Contents/MacOS/finalmic";
     void *lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
@@ -147,12 +136,7 @@ int main(int argc, char **argv) {
     printf("\n[loopback IO]\n");
     CHECK(vt->StartIO(drv, 2, 1) == noErr, "StartIO");
     const UInt32 frames = 512;
-    float wl[512], wr[512], rl[512], rr[512];
-    struct { AudioBufferList list; AudioBuffer second; } wbuf, rbuf;
-    AudioBufferList *wabl = (AudioBufferList *)&wbuf;
-    AudioBufferList *rabl = (AudioBufferList *)&rbuf;
-    make_abl(wabl, wl, wr, frames);
-    make_abl(rabl, rl, rr, frames);
+    float wbuf[512 * 2], rbuf[512 * 2];
     AudioServerPlugInIOCycleInfo cycle;
     memset(&cycle, 0, sizeof(cycle));
     cycle.mNominalIOBufferFrameSize = frames;
@@ -160,17 +144,20 @@ int main(int argc, char **argv) {
     int mismatches = 0;
     for (int c = 0; c < 12; c++) {
         float base = (float)(c * 1000);
-        for (UInt32 i = 0; i < frames; i++) { wl[i] = base + i; wr[i] = -base - i; }
+        for (UInt32 i = 0; i < frames; i++) {
+            wbuf[i * 2 + 0] = base + i;
+            wbuf[i * 2 + 1] = -base - i;
+        }
         OSStatus st1 = vt->DoIOOperation(drv, 2, 4, 1, kAudioServerPlugInIOOperationWriteMix,
-                                          frames, &cycle, wabl, NULL);
-        memset(rl, 0, sizeof rl); memset(rr, 0, sizeof rr);
+                                          frames, &cycle, wbuf, NULL);
+        memset(rbuf, 0, sizeof rbuf);
         OSStatus st2 = vt->DoIOOperation(drv, 2, 3, 1, kAudioServerPlugInIOOperationReadInput,
-                                          frames, &cycle, rabl, NULL);
+                                          frames, &cycle, rbuf, NULL);
         if (st1 != noErr || st2 != noErr) { mismatches++; continue; }
         if (c >= 2) {
             float expect = (float)((c - 2) * 1000);
-            if (rl[0] != expect || rl[frames - 1] != expect + frames - 1 ||
-                rr[0] != -expect) mismatches++;
+            if (rbuf[0] != expect || rbuf[(frames - 1) * 2] != expect + frames - 1 ||
+                rbuf[1] != -expect) mismatches++;
         }
     }
     CHECK(mismatches == 0, "ring delivers data two buffers late, sample exact");

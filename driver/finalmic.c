@@ -99,16 +99,10 @@ static void fourcc(UInt32 v, char out[5]) {
 }
 
 static void log_io(const char *op, UInt32 dev, UInt32 stream, UInt32 frames,
-                   AudioBufferList *abl, const char *note) {
-    UInt32 nb = abl ? abl->mNumberBuffers : 0;
-    UInt32 ch = 0;
-    double first = 0.0;
-    if (abl && nb > 0 && abl->mBuffers[0].mData) {
-        ch = abl->mBuffers[0].mNumberChannels;
-        first = ((float *)abl->mBuffers[0].mData)[0];
-    }
-    fm_log("io %-4s dev=%u st=%u n=%u nb=%u ch=%u first=%.6f %s",
-           op, dev, stream, frames, nb, ch, first, note ? note : "");
+                   const float *samples, const char *note) {
+    double first = samples ? (double)samples[0] : 0.0;
+    fm_log("io %-4s dev=%u st=%u n=%u first=%.6f %s",
+           op, dev, stream, frames, first, note ? note : "");
 }
 
 /* --------------------------------------------------------------- helpers */
@@ -151,13 +145,12 @@ static void fill_asbd(AudioStreamBasicDescription *asbd, Float64 rate) {
     memset(asbd, 0, sizeof(*asbd));
     asbd->mSampleRate       = rate;
     asbd->mFormatID         = kAudioFormatLinearPCM;
-    asbd->mFormatFlags      = kAudioFormatFlagsNativeFloatPacked |
-                              kAudioFormatFlagIsNonInterleaved;
+    asbd->mFormatFlags      = kAudioFormatFlagsNativeFloatPacked; /* interleaved */
     asbd->mChannelsPerFrame = 2;
     asbd->mBitsPerChannel   = 32;
     asbd->mFramesPerPacket  = 1;
-    asbd->mBytesPerFrame    = 4;
-    asbd->mBytesPerPacket   = 4;
+    asbd->mBytesPerFrame    = 8;
+    asbd->mBytesPerPacket   = 8;
 }
 
 static OSStatus put_asbd(UInt32 *ioSize, void *out, UInt32 inSize, Float64 rate) {
@@ -753,16 +746,6 @@ static OSStatus STDMETHODCALLTYPE drv_EndIOOperation(AudioServerPlugInDriverRef 
     return noErr;
 }
 
-/* Sample access that handles both interleaved and non-interleaved layouts. */
-static inline float *sample_ptr(AudioBufferList *abl, UInt32 frame, UInt32 ch) {
-    if (abl->mNumberBuffers == 1) {
-        float *base = (float *)abl->mBuffers[0].mData;
-        return base + frame * abl->mBuffers[0].mNumberChannels + ch;
-    }
-    float *base = (float *)abl->mBuffers[ch].mData;
-    return base + frame;
-}
-
 static OSStatus STDMETHODCALLTYPE drv_DoIOOperation(AudioServerPlugInDriverRef inDriver,
                                                     AudioObjectID inDeviceObjectID,
                                                     AudioObjectID inStreamObjectID,
@@ -776,15 +759,16 @@ static OSStatus STDMETHODCALLTYPE drv_DoIOOperation(AudioServerPlugInDriverRef i
     FinalmicDriver *d = driver_from_ref(inDriver);
     if (!d) return kAudioHardwareBadObjectError;
 
-    AudioBufferList *abl = (AudioBufferList *)ioMainBuffer;
-    if (!abl && ioSecondaryBuffer) abl = (AudioBufferList *)ioSecondaryBuffer;
+    /* For in-place operations the HAL hands over the interleaved sample data
+     * directly, not an AudioBufferList. */
+    float *samples = (float *)ioMainBuffer;
+    if (!samples) samples = (float *)ioSecondaryBuffer;
 
     char op[5];
     fourcc(inOperationID, op);
-    log_io(op, inDeviceObjectID, inStreamObjectID, inIOBufferFrameSize, abl,
-           abl ? "" : "no-buffer");
-
-    if (!abl || abl->mNumberBuffers == 0 || !abl->mBuffers[0].mData) return noErr;
+    log_io(op, inDeviceObjectID, inStreamObjectID, inIOBufferFrameSize, samples,
+           samples ? "" : "no-buffer");
+    if (!samples) return noErr;
 
     UInt32 n = inIOBufferFrameSize;
     if (n > kRingFrames / 2) n = kRingFrames / 2;
@@ -798,8 +782,8 @@ static OSStatus STDMETHODCALLTYPE drv_DoIOOperation(AudioServerPlugInDriverRef i
         }
         for (UInt32 i = 0; i < n; i++) {
             uint32_t idx = (uint32_t)((w + i) & kRingMask);
-            d->ring[idx * 2 + 0] = *sample_ptr(abl, i, 0);
-            d->ring[idx * 2 + 1] = *sample_ptr(abl, i, 1);
+            d->ring[idx * 2 + 0] = samples[i * 2 + 0];
+            d->ring[idx * 2 + 1] = samples[i * 2 + 1];
         }
         atomic_store_explicit(&d->writePos, w + n, memory_order_release);
         return noErr;
@@ -808,19 +792,18 @@ static OSStatus STDMETHODCALLTYPE drv_DoIOOperation(AudioServerPlugInDriverRef i
     if (inOperationID == kAudioServerPlugInIOOperationReadInput) {
         uint64_t w = atomic_load_explicit(&d->writePos, memory_order_acquire);
         uint64_t r = atomic_load_explicit(&d->readPos, memory_order_relaxed);
-        uint64_t avail = w - r;
-        if (avail < (uint64_t)n) {
+        if (w - r < (uint64_t)n) {
             atomic_fetch_add(&d->underruns, 1);
             for (UInt32 i = 0; i < n; i++) {
-                *sample_ptr(abl, i, 0) = 0.0f;
-                *sample_ptr(abl, i, 1) = 0.0f;
+                samples[i * 2 + 0] = 0.0f;
+                samples[i * 2 + 1] = 0.0f;
             }
             return noErr;
         }
         for (UInt32 i = 0; i < n; i++) {
             uint32_t idx = (uint32_t)((r + i) & kRingMask);
-            *sample_ptr(abl, i, 0) = d->ring[idx * 2 + 0];
-            *sample_ptr(abl, i, 1) = d->ring[idx * 2 + 1];
+            samples[i * 2 + 0] = d->ring[idx * 2 + 0];
+            samples[i * 2 + 1] = d->ring[idx * 2 + 1];
         }
         atomic_store_explicit(&d->readPos, r + n, memory_order_release);
         return noErr;
