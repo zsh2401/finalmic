@@ -148,6 +148,12 @@ finalmic run --mic "MacBook Pro Microphone" --capture "UGREEN" \
 先确认采集卡在别的软件（QuickTime → 新建音频录制）里有电平。`finalmic doctor`
 会给出每一路 1 秒采样的峰值。
 
+**设备名为什么不是 “finalmic”？**
+macOS 里能出现在直播软件下拉框中的设备名，由那块虚拟声卡的驱动决定（`BlackHole 2ch`、
+`WeMeet Audio Device`……），普通进程改不了自己的名字。finalmic 是混音器，虚拟声卡是它的出口。
+想让下拉框里出现 `finalmic`，需要在「音频 MIDI 设置」里把这块虚拟声卡建成一个聚合设备并命名为
+finalmic，代价是它会变成系统里长期存在的设备，所以默认没有这么做。
+
 **能混更多路吗？**
 可以，最多 4 路：`--mic A --capture B --in C --in D`。
 
