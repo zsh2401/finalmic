@@ -1,5 +1,7 @@
 # finalmic
 
+[![ci](https://github.com/zsh2401/finalmic/actions/workflows/ci.yml/badge.svg)](https://github.com/zsh2401/finalmic/actions/workflows/ci.yml)
+
 > 把「你的麦克风」和「采集卡的声音」混成一路虚拟麦克风 —— 给抖音直播伴侣 / OBS / 腾讯会议用。
 >
 > 一个 macOS 上的命令行混音器，Go + CoreAudio，48 kHz / 32-bit float，带时钟漂移补偿。
@@ -56,6 +58,10 @@ brew install --cask blackhole-2ch
 `finalmic` 会自动优先选择这类回环设备。
 
 ## 快速开始
+
+> 也可以直接下载 [Releases](https://github.com/zsh2401/finalmic/releases) 里的 `finalmic-darwin-arm64` 二进制，
+> 但混音引擎依赖 CoreAudio，只支持 macOS。
+
 
 ```bash
 make build     # 构建当前平台的 bin/finalmic
