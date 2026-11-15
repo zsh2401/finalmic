@@ -187,7 +187,43 @@ func choosePlan(o *runOptions) (*config.Config, error) {
 		}
 		return runWizard()
 	}
+	preferOwnDevice(cfg)
 	return cfg, nil
+}
+
+// preferOwnDevice switches a saved configuration over to finalmic's own
+// virtual sound card once the driver is installed. Only virtual loopbacks are
+// replaced, never a real speaker or interface the user picked on purpose.
+func preferOwnDevice(cfg *config.Config) {
+	own, ok := findOwnDevice()
+	if !ok || cfg.OutputUID == own.UID {
+		return
+	}
+	cur, err := audio.ResolveOutput(cfg.OutputUID)
+	if err != nil {
+		cur, err = audio.ResolveOutput(cfg.OutputName)
+	}
+	if err != nil || !looksLoopback(cur) || isOwnDevice(cur) {
+		return
+	}
+	fmt.Printf("  检测到 finalmic 虚拟声卡，输出已从 “%s” 切换到 “%s”\n", cur.Name, own.Name)
+	cfg.OutputUID, cfg.OutputName = own.UID, own.Name
+	if err := config.Save(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "  (配置未保存: %v)\n", err)
+	}
+}
+
+func findOwnDevice() (audio.Device, bool) {
+	outs, err := audio.Outputs()
+	if err != nil {
+		return audio.Device{}, false
+	}
+	for _, d := range outs {
+		if isOwnDevice(d) {
+			return d, true
+		}
+	}
+	return audio.Device{}, false
 }
 
 func cmdRun(args []string) int {
