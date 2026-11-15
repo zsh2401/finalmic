@@ -59,8 +59,8 @@ brew install --cask blackhole-2ch
 
 ## 快速开始
 
-> 也可以直接下载 [Releases](https://github.com/zsh2401/finalmic/releases) 里的 `finalmic-darwin-arm64` 二进制，
-> 但混音引擎依赖 CoreAudio，只支持 macOS。
+> [Releases](https://github.com/zsh2401/finalmic/releases) 里有版本源码包；
+> 因为引擎是 cgo + CoreAudio，二进制请用 `make build` 在本机构建（只支持 macOS）。
 
 
 ```bash
